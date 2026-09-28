@@ -32,6 +32,17 @@ export interface SupplyIssue {
   operator: string;
   specimenNo: string;
   issuedAt: number;
+  /** 关联的工序节点（工序领用时写入，手工领用为空） */
+  procedureId?: string;
+  /** 关联的工序节点名称快照，便于台账直接展示用途 */
+  procedureNode?: string;
+  /** 关联的用量条目 id（PrepProcedure.materialUsages[].id） */
+  usageId?: string;
+  /** 用途品名快照（如 气动笔 / Paraloid B-72） */
+  itemName?: string;
+  /** 工序回退后该笔领用已退回库存 */
+  returned?: boolean;
+  returnedAt?: number;
 }
 
 export type SupplyLotDraft = Omit<SupplyLot, 'id' | 'issues'>;

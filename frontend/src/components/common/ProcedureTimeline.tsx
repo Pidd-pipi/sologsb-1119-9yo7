@@ -99,13 +99,35 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
               </Stack>
               <Collapse in={open} unmountOnExit>
                 <Divider sx={{ my: 1 }} />
+                {node.materialUsages && node.materialUsages.length > 0 ? (
+                  <Stack spacing={0.75} sx={{ mb: 1 }}>
+                    <Typography variant="body2" fontWeight={700}>
+                      材料领用明细（{node.state === 'rolledback' ? '已回退退库' : '已按批次扣减库存'}）
+                    </Typography>
+                    {node.materialUsages.map((u) => (
+                      <Stack key={u.id} direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                        <Chip size="small" variant="outlined" label={u.kind} />
+                        <Typography variant="body2">
+                          {u.itemName} · 批号 {u.lotNo} · 用量 {u.qty} {u.unit}
+                        </Typography>
+                        {u.returned ? <Chip size="small" color="warning" label="已退回库存" /> : null}
+                      </Stack>
+                    ))}
+                  </Stack>
+                ) : (
+                  <Stack direction="row" spacing={2} flexWrap="wrap" rowGap={0.5} sx={{ mb: 1 }}>
+                    <Typography variant="body2">工具：{node.tools.length ? node.tools.join('、') : '—'}</Typography>
+                    <Typography variant="body2">磨料：{node.abrasive || '—'}</Typography>
+                    <Typography variant="body2">
+                      胶种：{node.adhesive || '—'}
+                      {node.adhesiveConc > 0 ? `（浓度 ${node.adhesiveConc} %）` : ''}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      （旧工序，未登记批次用量）
+                    </Typography>
+                  </Stack>
+                )}
                 <Stack direction="row" spacing={2} flexWrap="wrap" rowGap={0.5}>
-                  <Typography variant="body2">工具：{node.tools.length ? node.tools.join('、') : '—'}</Typography>
-                  <Typography variant="body2">磨料：{node.abrasive || '—'}</Typography>
-                  <Typography variant="body2">
-                    胶种：{node.adhesive || '—'}
-                    {node.adhesiveConc > 0 ? `（浓度 ${node.adhesiveConc} %）` : ''}
-                  </Typography>
                   <Typography variant="body2">
                     环境：{node.tempC} ℃ / RH {node.rh} %
                   </Typography>

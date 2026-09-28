@@ -7,7 +7,7 @@ import { makeSketchDataUrl } from '../types/photo';
 import { newId } from './id';
 
 /** 当前数据结构版本，写入 localStorage 便于回显 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DB_NAME = 'gbfossilprep';
 export const LS_VERSION_KEY = 'gbfossilprep:db-version';
 
@@ -52,6 +52,22 @@ class FossilPrepDB extends Dexie {
           .modify((row: any) => {
             if (!row.issues) row.issues = [];
             if (row.lowThreshold === undefined) row.lowThreshold = 1;
+          });
+      });
+    // v3：工序与材料领用打通，工序增加 materialUsages 快照（老工序为空数组，回退不动库存）
+    this.version(3)
+      .stores({
+        specimens: 'id, specimenNo, taxon, locality, status, createdAt',
+        procedures: 'id, specimenId, seq, stepType, state, startedAt',
+        supplies: 'id, kind, lotNo, name, openedAt',
+        photos: 'id, specimenId, procedureId, stage, capturedAt',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('procedures')
+          .toCollection()
+          .modify((row: any) => {
+            if (!Array.isArray(row.materialUsages)) row.materialUsages = [];
           });
       });
   }
@@ -118,9 +134,33 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
+  const prc1Id = newId('prc');
+  const prc2Id = newId('prc');
+  const supB72Id = newId('sup');
+  const supSicId = newId('sup');
+  const supPenId = newId('sup');
+  const supPickId = newId('sup');
+  const supBrushId = newId('sup');
+  const supE44Id = newId('sup');
+  const supNeedleId = newId('sup');
+  const supUsId = newId('sup');
+
+  // 节点 1（已完成）：气动笔 + 剔针 + 800 目磨料，三笔用量均已扣库存
+  const use1PenId = newId('mu');
+  const use1PickId = newId('mu');
+  const use1SicId = newId('mu');
+  const iss1PenId = newId('iss');
+  const iss1PickId = newId('iss');
+  const iss1SicId = newId('iss');
+  // 节点 2（待办）：渗透滴管 + B-72，扣减已发生、尚未完成
+  const use2DropperId = newId('mu');
+  const use2B72Id = newId('mu');
+  const iss2DropperId = newId('iss');
+  const iss2B72Id = newId('iss');
+
   const procedures: PrepProcedure[] = [
     {
-      id: newId('prc'),
+      id: prc1Id,
       specimenId,
       stepType: '清修',
       nodeName: '左侧肩胛区粗清',
@@ -138,9 +178,41 @@ export async function ensureSeedData(): Promise<void> {
       startedAt: now - 10 * day,
       state: 'done',
       finishedAt: now - 10 * day + 145 * 60000,
+      materialUsages: [
+        {
+          id: use1PenId,
+          kind: '工具',
+          itemName: '气动笔',
+          lotId: supPenId,
+          lotNo: 'PEN-2308',
+          qty: 1,
+          unit: '支',
+          issueId: iss1PenId,
+        },
+        {
+          id: use1PickId,
+          kind: '工具',
+          itemName: '剔针',
+          lotId: supPickId,
+          lotNo: 'PICK-2310',
+          qty: 2,
+          unit: '支',
+          issueId: iss1PickId,
+        },
+        {
+          id: use1SicId,
+          kind: '磨料',
+          itemName: '800 目',
+          lotId: supSicId,
+          lotNo: 'SIC-800-2401',
+          qty: 1,
+          unit: '袋',
+          issueId: iss1SicId,
+        },
+      ],
     },
     {
-      id: newId('prc'),
+      id: prc2Id,
       specimenId,
       stepType: '加固',
       nodeName: '围岩裂隙渗透加固',
@@ -157,6 +229,28 @@ export async function ensureSeedData(): Promise<void> {
       operator: '林砚秋',
       startedAt: now - 6 * day,
       state: 'pending',
+      materialUsages: [
+        {
+          id: use2DropperId,
+          kind: '工具',
+          itemName: '渗透滴管',
+          lotId: supBrushId,
+          lotNo: 'DROP-1ML-2403',
+          qty: 2,
+          unit: '支',
+          issueId: iss2DropperId,
+        },
+        {
+          id: use2B72Id,
+          kind: '胶种',
+          itemName: 'Paraloid B-72',
+          lotId: supB72Id,
+          lotNo: 'B72-20240312',
+          qty: 1,
+          unit: '瓶',
+          issueId: iss2B72Id,
+        },
+      ],
     },
   ];
 
@@ -185,28 +279,62 @@ export async function ensureSeedData(): Promise<void> {
 
   const supplies: SupplyLot[] = [
     {
-      id: newId('sup'),
+      id: supB72Id,
       name: 'Paraloid B-72',
       kind: '胶种',
       spec: '分析纯 500 g',
       lotNo: 'B72-20240312',
-      qty: 4,
+      qty: 3,
       unit: '瓶',
       openedAt: now - 40 * day,
       shelfLifeMonths: 36,
       lowThreshold: 2,
       issues: [
         {
-          id: newId('iss'),
+          id: iss2B72Id,
           qty: 1,
           operator: '林砚秋',
           specimenNo: 'FP-2024-0031',
           issuedAt: now - 6 * day,
+          procedureId: prc2Id,
+          procedureNode: '#2 加固 · 围岩裂隙渗透加固',
+          usageId: use2B72Id,
+          itemName: 'Paraloid B-72',
+        },
+        {
+          id: newId('iss'),
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 9 * day,
+          itemName: 'Paraloid B-72',
         },
       ],
     },
     {
-      id: newId('sup'),
+      id: supE44Id,
+      name: '环氧树脂 E44',
+      kind: '胶种',
+      spec: '固化剂套装 1 kg',
+      lotNo: 'E44-20220108',
+      qty: 0,
+      unit: '套',
+      openedAt: now - 200 * day,
+      shelfLifeMonths: 6,
+      lowThreshold: 1,
+      issues: [
+        {
+          id: newId('iss'),
+          qty: 1,
+          operator: '周慕白',
+          specimenNo: 'FP-2024-0058',
+          issuedAt: now - 150 * day,
+          itemName: '环氧树脂 E44',
+        },
+      ],
+    },
+    {
+      id: supSicId,
       name: '碳化硅磨料',
       kind: '磨料',
       spec: '800 目 1 kg',
@@ -216,10 +344,97 @@ export async function ensureSeedData(): Promise<void> {
       openedAt: now - 60 * day,
       shelfLifeMonths: 60,
       lowThreshold: 2,
-      issues: [],
+      issues: [
+        {
+          id: iss1SicId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 10 * day,
+          procedureId: prc1Id,
+          procedureNode: '#1 清修 · 左侧肩胛区粗清',
+          usageId: use1SicId,
+          itemName: '800 目',
+        },
+      ],
     },
     {
-      id: newId('sup'),
+      id: supPenId,
+      name: '气动笔',
+      kind: '工具',
+      spec: '往复式 2.3 mm 夹头',
+      lotNo: 'PEN-2308',
+      qty: 1,
+      unit: '支',
+      openedAt: now - 120 * day,
+      shelfLifeMonths: 120,
+      lowThreshold: 2,
+      issues: [
+        {
+          id: iss1PenId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 10 * day,
+          procedureId: prc1Id,
+          procedureNode: '#1 清修 · 左侧肩胛区粗清',
+          usageId: use1PenId,
+          itemName: '气动笔',
+        },
+      ],
+    },
+    {
+      id: supPickId,
+      name: '剔针',
+      kind: '工具',
+      spec: '钨钢尖针 0.8 mm',
+      lotNo: 'PICK-2310',
+      qty: 3,
+      unit: '支',
+      openedAt: now - 90 * day,
+      shelfLifeMonths: 120,
+      lowThreshold: 5,
+      issues: [
+        {
+          id: iss1PickId,
+          qty: 2,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 10 * day,
+          procedureId: prc1Id,
+          procedureNode: '#1 清修 · 左侧肩胛区粗清',
+          usageId: use1PickId,
+          itemName: '剔针',
+        },
+      ],
+    },
+    {
+      id: supBrushId,
+      name: '渗透滴管',
+      kind: '工具',
+      spec: '一次性 1 mL',
+      lotNo: 'DROP-1ML-2403',
+      qty: 8,
+      unit: '支',
+      openedAt: now - 30 * day,
+      shelfLifeMonths: 36,
+      lowThreshold: 10,
+      issues: [
+        {
+          id: iss2DropperId,
+          qty: 2,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 6 * day,
+          procedureId: prc2Id,
+          procedureNode: '#2 加固 · 围岩裂隙渗透加固',
+          usageId: use2DropperId,
+          itemName: '渗透滴管',
+        },
+      ],
+    },
+    {
+      id: supNeedleId,
       name: '气动笔针头',
       kind: '耗材',
       spec: '钨钢 2.3 mm',
@@ -232,7 +447,7 @@ export async function ensureSeedData(): Promise<void> {
       issues: [],
     },
     {
-      id: newId('sup'),
+      id: supUsId,
       name: '超声波清洗机',
       kind: '工具',
       spec: '6 L / 40 kHz',

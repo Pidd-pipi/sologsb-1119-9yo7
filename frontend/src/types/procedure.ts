@@ -43,6 +43,29 @@ export const STEP_FIELD_MAP: Record<
 /** 工序节点状态 */
 export type ProcedureState = 'pending' | 'done' | 'rolledback';
 
+/** 工序可领用的材料种类 */
+export type MaterialKind = '工具' | '磨料' | '胶种';
+
+/** 工序上的一笔材料用量（按批次扣减库存后留下的使用记录） */
+export interface MaterialUsage {
+  id: string;
+  kind: MaterialKind;
+  /** 品名（工具名 / 磨料目数 / 胶种名） */
+  itemName: string;
+  /** 所选材料批次 id */
+  lotId: string;
+  /** 批号快照 */
+  lotNo: string;
+  /** 用量 */
+  qty: number;
+  /** 单位快照 */
+  unit: string;
+  /** 扣库存时写入的领用记录 id（SupplyIssue.id） */
+  issueId?: string;
+  /** 工序节点回退后该笔用量已退回对应批次 */
+  returned?: boolean;
+}
+
 /** 修复工序 */
 export interface PrepProcedure {
   id: string;
@@ -72,6 +95,8 @@ export interface PrepProcedure {
   startedAt: number;
   state: ProcedureState;
   finishedAt?: number;
+  /** 按批次领用的材料用量（v3 起；老工序为空数组，回退时不影响库存） */
+  materialUsages: MaterialUsage[];
 }
 
 export type PrepProcedureDraft = Omit<PrepProcedure, 'id'>;
