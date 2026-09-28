@@ -135,12 +135,20 @@ export default function SpecimenDetail() {
             <ProcedureTimeline
               items={progress.list}
               onFinish={async (pid) => {
-                await finish(pid);
-                setToast('节点已完成');
+                try {
+                  await finish(pid);
+                  setToast('节点已完成');
+                } catch (e) {
+                  setToast(e instanceof Error ? e.message : '完成失败');
+                }
               }}
               onRollback={async (pid) => {
-                await rollback(pid);
-                setToast('节点已回退');
+                try {
+                  await rollback(pid);
+                  setToast('节点已回退，材料用量已退回对应批次');
+                } catch (e) {
+                  setToast(e instanceof Error ? e.message : '回退失败');
+                }
               }}
             />
           </Paper>

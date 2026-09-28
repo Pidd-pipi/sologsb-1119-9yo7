@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Paper from '@mui/material/Paper';
@@ -13,6 +14,7 @@ import DialogContent from '@mui/material/DialogContent';
 import DialogActions from '@mui/material/DialogActions';
 import Alert from '@mui/material/Alert';
 import Snackbar from '@mui/material/Snackbar';
+import Collapse from '@mui/material/Collapse';
 import Table from '@mui/material/Table';
 import TableHead from '@mui/material/TableHead';
 import TableBody from '@mui/material/TableBody';
@@ -22,7 +24,15 @@ import AddIcon from '@mui/icons-material/Add';
 import { useSupplyStore } from '../stores/supplyStore';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { MeasureField } from '../components/common/MeasureField';
-import { SUPPLY_KINDS, isLowStock, shelfLifeLeftDays, type SupplyKind, type SupplyLot, type SupplyLotDraft } from '../types/supply';
+import {
+  SUPPLY_KINDS,
+  isLowStock,
+  isLotExpired,
+  shelfLifeLeftDays,
+  type SupplyKind,
+  type SupplyLot,
+  type SupplyLotDraft,
+} from '../types/supply';
 
 const EMPTY_DRAFT: SupplyLotDraft = {
   name: '',
@@ -36,8 +46,9 @@ const EMPTY_DRAFT: SupplyLotDraft = {
   lowThreshold: 2,
 };
 
-/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮 */
+/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮、用途明细可展开 */
 export default function SupplyList() {
+  const navigate = useNavigate();
   const lots = useSupplyStore((s) => s.items);
   const addLot = useSupplyStore((s) => s.add);
   const issue = useSupplyStore((s) => s.issue);
@@ -51,8 +62,19 @@ export default function SupplyList() {
   const [issueQty, setIssueQty] = useState(1);
   const [issueOperator, setIssueOperator] = useState('');
   const [issueSpecimen, setIssueSpecimen] = useState('');
+  /** 展开查看用途明细的批次 id 集合 */
+  const [expandedLots, setExpandedLots] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+
+  const toggleLot = (id: string) => {
+    setExpandedLots((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const filtered = useMemo(() => {
     const kw = trace.trim();
@@ -91,16 +113,29 @@ export default function SupplyList() {
       setError('领用人必填');
       return;
     }
-    await issue(issueTarget.id, {
-      qty: issueQty,
-      operator: issueOperator.trim(),
-      specimenNo: issueSpecimen || '未关联标本',
-    });
-    setIssueTarget(null);
-    setIssueQty(1);
-    setIssueOperator('');
-    setError('');
-    setToast('领用已登记');
+    const chosenSpecimen = specimens.find((s) => s.specimenNo === issueSpecimen);
+    try {
+      await issue(issueTarget.id, {
+        qty: issueQty,
+        operator: issueOperator.trim(),
+        specimenNo: issueSpecimen || '未关联标本',
+        specimenId: chosenSpecimen?.id,
+      });
+      setIssueTarget(null);
+      setIssueQty(1);
+      setIssueOperator('');
+      setIssueSpecimen('');
+      setError('');
+      setToast('领用已登记，库存已扣减');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '领用失败');
+    }
+  };
+
+  const fmtIssueTime = (ts: number): string => {
+    const d = new Date(ts);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   };
 
   const lowCount = lots.filter(isLowStock).length;
@@ -170,15 +205,18 @@ export default function SupplyList() {
                   <TableCell align="right">在库</TableCell>
                   <TableCell align="right">低量阈值</TableCell>
                   <TableCell align="right">剩余保质期</TableCell>
-                  <TableCell>最近领用</TableCell>
+                  <TableCell>用途明细</TableCell>
                   <TableCell align="right">操作</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {group.rows.map((lot) => {
                   const low = isLowStock(lot);
+                  const expired = isLotExpired(lot);
                   const left = shelfLifeLeftDays(lot);
-                  return (
+                  const activeCount = lot.issues.filter((i) => !i.reversed).length;
+                  const open = expandedLots.has(lot.id);
+                  return [
                     <TableRow
                       key={lot.id}
                       hover
@@ -196,17 +234,27 @@ export default function SupplyList() {
                       </TableCell>
                       <TableCell align="right">{lot.lowThreshold}</TableCell>
                       <TableCell align="right">
-                        {left < 0 ? <Chip size="small" color="error" label={`已过期 ${-left} 天`} /> : `${left} 天`}
+                        {expired ? (
+                          <Chip size="small" color="error" label={`已过期 ${-left} 天`} />
+                        ) : (
+                          `${left} 天`
+                        )}
                       </TableCell>
                       <TableCell>
-                        {lot.issues.length === 0
-                          ? '—'
-                          : `${lot.issues[0].operator} 领 ${lot.issues[0].qty} ${lot.unit}（${lot.issues[0].specimenNo}）`}
+                        {lot.issues.length === 0 ? (
+                          '—'
+                        ) : (
+                          <Button size="small" onClick={() => toggleLot(lot.id)}>
+                            {open ? '收起' : '查看'}
+                            {`（领用 ${activeCount}${lot.issues.length !== activeCount ? ` / 退库 ${lot.issues.length - activeCount}` : ''}）`}
+                          </Button>
+                        )}
                       </TableCell>
                       <TableCell align="right">
                         <Button
                           size="small"
-                          disabled={lot.qty <= 0}
+                          disabled={lot.qty <= 0 || expired}
+                          title={expired ? '批次已过期，不能领用' : lot.qty <= 0 ? '无库存' : ''}
                           onClick={() => {
                             setIssueTarget(lot);
                             setIssueQty(1);
@@ -216,24 +264,82 @@ export default function SupplyList() {
                           领用
                         </Button>
                       </TableCell>
-                    </TableRow>
-                  );
+                    </TableRow>,
+                    lot.issues.length > 0 ? (
+                      <TableRow key={`${lot.id}-detail`} sx={{ '& > td': { p: 0, borderBottom: open ? 1 : 0 } }}>
+                        <TableCell colSpan={8} sx={{ p: 0 }}>
+                          <Collapse in={open} unmountOnExit>
+                            <Box sx={{ px: 2, py: 1, bgcolor: 'grey.50' }}>
+                              <Table size="small">
+                                <TableHead>
+                                  <TableRow>
+                                    <TableCell>时间</TableCell>
+                                    <TableCell>用途</TableCell>
+                                    <TableCell>用于标本 / 工序</TableCell>
+                                    <TableCell align="right">数量</TableCell>
+                                    <TableCell>领用人</TableCell>
+                                    <TableCell>状态</TableCell>
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {lot.issues.map((i) => (
+                                    <TableRow key={i.id} data-testid={`issue-row-${i.id}`}>
+                                      <TableCell>{fmtIssueTime(i.issuedAt)}</TableCell>
+                                      <TableCell>
+                                        {i.purpose === 'procedure' ? (
+                                          <Chip size="small" variant="outlined" label="工序录入" />
+                                        ) : (
+                                          <Chip size="small" label="手动领用" />
+                                        )}
+                                        {i.materialName ? (
+                                          <Typography variant="caption" sx={{ ml: 0.5 }}>
+                                            {i.materialName}
+                                          </Typography>
+                                        ) : null}
+                                      </TableCell>
+                                      <TableCell>
+                                        {i.specimenId && i.specimenNo !== '未关联标本' ? (
+                                          <Button
+                                            size="small"
+                                            sx={{ minWidth: 0, textTransform: 'none' }}
+                                            onClick={() => navigate(`/specimens/${i.specimenId}`)}
+                                          >
+                                            {i.specimenNo}
+                                          </Button>
+                                        ) : (
+                                          i.specimenNo
+                                        )}
+                                        {i.usageNote ? (
+                                          <Typography variant="caption" color="text.secondary" display="block">
+                                            {i.usageNote}
+                                          </Typography>
+                                        ) : null}
+                                      </TableCell>
+                                      <TableCell align="right">
+                                        {i.qty} {lot.unit}
+                                      </TableCell>
+                                      <TableCell>{i.operator}</TableCell>
+                                      <TableCell>
+                                        {i.reversed ? (
+                                          <Chip size="small" color="warning" label="已退库" />
+                                        ) : (
+                                          <Chip size="small" color="success" variant="outlined" label="已扣减" />
+                                        )}
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </Box>
+                          </Collapse>
+                        </TableCell>
+                      </TableRow>
+                    ) : null,
+                  ];
                 })}
               </TableBody>
             </Table>
           )}
-          {group.rows.some((r) => r.issues.length > 1) ? (
-            <Stack spacing={0.5} sx={{ mt: 1 }}>
-              {group.rows
-                .filter((r) => r.issues.length > 1)
-                .map((r) => (
-                  <Typography key={r.id} variant="caption" color="text.secondary">
-                    批号 {r.lotNo} 的领用明细：
-                    {r.issues.map((i) => `${i.operator} ${i.qty}${r.unit}→${i.specimenNo}`).join('；')}
-                  </Typography>
-                ))}
-            </Stack>
-          ) : null}
         </Paper>
       ))}
 
@@ -345,6 +451,11 @@ export default function SupplyList() {
               <Typography variant="body2" color="text.secondary">
                 批号 {issueTarget.lotNo} · 现存 {issueTarget.qty} {issueTarget.unit}
               </Typography>
+            ) : null}
+            {issueTarget && isLotExpired(issueTarget) ? (
+              <Alert severity="error">
+                该批次已过期 {-shelfLifeLeftDays(issueTarget)} 天，不能领用。
+              </Alert>
             ) : null}
             <MeasureField
               label="领用数量"

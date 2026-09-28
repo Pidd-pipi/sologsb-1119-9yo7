@@ -13,7 +13,8 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
 import UndoIcon from '@mui/icons-material/Undo';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import type { PrepProcedure } from '../../types/procedure';
+import type { MaterialRole, PrepProcedure } from '../../types/procedure';
+import { MATERIAL_ROLE_LABEL } from '../../types/procedure';
 
 export interface ProcedureTimelineProps {
   items: PrepProcedure[];
@@ -28,6 +29,8 @@ function fmtTime(ts?: number): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+
+const ROLE_ORDER: MaterialRole[] = ['tool', 'abrasive', 'adhesive'];
 
 /**
  * 纵向工序节点流：步骤图标、状态、耗时、环境参数折叠区。
@@ -120,6 +123,36 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                     </Button>
                   ) : null}
                 </Stack>
+
+                {node.usages && node.usages.length > 0 ? (
+                  <Box sx={{ mt: 1 }}>
+                    <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+                      <Typography variant="body2" fontWeight={700}>
+                        材料领用批次
+                      </Typography>
+                      {node.state === 'rolledback' ? (
+                        <Chip size="small" color="warning" label="已回退 · 用量已退库" />
+                      ) : (
+                        <Chip size="small" variant="outlined" label={`已扣减库存 ${node.usages.length} 项`} />
+                      )}
+                    </Stack>
+                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                      {[...node.usages]
+                        .sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role))
+                        .map((u) => (
+                          <Chip
+                            key={u.key}
+                            size="small"
+                            variant="outlined"
+                            sx={{ mb: 0.5 }}
+                            label={`${MATERIAL_ROLE_LABEL[u.role]} ${u.materialName} · 批号 ${u.lotNo} · ${u.qty} ${u.unit}${
+                              node.state === 'rolledback' ? '（已退库）' : ''
+                            }`}
+                          />
+                        ))}
+                    </Stack>
+                  </Box>
+                ) : null}
               </Collapse>
             </Paper>
           </Box>

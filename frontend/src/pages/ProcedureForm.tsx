@@ -10,26 +10,55 @@ import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import Alert from '@mui/material/Alert';
 import Snackbar from '@mui/material/Snackbar';
+import Divider from '@mui/material/Divider';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import Checkbox from '@mui/material/Checkbox';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useSupplyStore } from '../stores/supplyStore';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
 import { MeasureField } from '../components/common/MeasureField';
-import { STEP_FIELD_MAP, STEP_TYPES, type StepType } from '../types/procedure';
-import { db } from '../utils/db';
-import { newId } from '../utils/id';
+import {
+  STEP_FIELD_MAP,
+  STEP_TYPES,
+  MATERIAL_ROLE_LABEL,
+  type StepType,
+  type MaterialRole,
+} from '../types/procedure';
+import { isLotExpired, shelfLifeLeftDays, type SupplyKind, type SupplyLot } from '../types/supply';
 import { makeSketchDataUrl, type PrepPhoto } from '../types/photo';
+import { newId } from '../utils/id';
+import { usageLineKey, type UsageLineInput } from '../utils/materialUsage';
 
-/** /procedures/new 新建工序节点：选类型动态出字段，序号跳号报错 */
+/** 候选项名与批次名称的匹配（双向包含，容忍「800 目」↔「碳化硅磨料 800 目」这类写法） */
+function lotMatches(lot: SupplyLot, materialName: string): boolean {
+  const a = lot.name.trim();
+  const b = materialName.trim();
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+/** 一条材料行的批次 / 用量填写状态 */
+interface LineState {
+  lotId: string;
+  qty: number;
+}
+
+const ROLE_KIND: Record<MaterialRole, SupplyKind> = {
+  tool: '工具',
+  abrasive: '磨料',
+  adhesive: '胶种',
+};
+
+/** /procedures/new 新建工序节点：选类型动态出字段，工具/磨料/胶种按批次领用，序号跳号报错 */
 export default function ProcedureForm() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const specimens = useSpecimenStore((s) => s.items);
-  const addProcedure = useProcedureStore((s) => s.add);
+  const addProcedure = useProcedureStore((s) => s.create);
   const finish = useProcedureStore((s) => s.finish);
   const rollback = useProcedureStore((s) => s.rollback);
+  const lots = useSupplyStore((s) => s.items);
 
   const [specimenId, setSpecimenId] = useState(params.get('specimenId') ?? specimens[0]?.id ?? '');
   const [stepType, setStepType] = useState<StepType>('清修');
@@ -44,6 +73,8 @@ export default function ProcedureForm() {
   const [rh, setRh] = useState(50);
   const [operator, setOperator] = useState('');
   const [withPhotos, setWithPhotos] = useState(true);
+  /** key = role:materialName */
+  const [lines, setLines] = useState<Record<string, LineState>>({});
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
 
@@ -53,7 +84,35 @@ export default function ProcedureForm() {
 
   const specimen = useMemo(() => specimens.find((it) => it.id === specimenId), [specimens, specimenId]);
 
+  /** 当前已选材料行（工具多选 + 磨料单选 + 胶种单选） */
+  const selectedLines = useMemo(
+    () => [
+      ...tools.map((name) => ({ role: 'tool' as MaterialRole, materialName: name })),
+      ...(abrasive ? [{ role: 'abrasive' as MaterialRole, materialName: abrasive }] : []),
+      ...(adhesive ? [{ role: 'adhesive' as MaterialRole, materialName: adhesive }] : []),
+    ],
+    [tools, abrasive, adhesive],
+  );
+
+  /** 每种材料候选的有效批次（未过期、同种类，按名称匹配） */
+  const lotsFor = (role: MaterialRole, materialName: string): SupplyLot[] => {
+    const kind = ROLE_KIND[role];
+    return lots
+      .filter((lot) => lot.kind === kind && lotMatches(lot, materialName))
+      .sort((a, b) => a.lotNo.localeCompare(b.lotNo));
+  };
+
+  const setLine = (key: string, patch: Partial<LineState>) => {
+    setLines((prev) => {
+      const cur = prev[key] ?? { lotId: '', qty: 1 };
+      return { ...prev, [key]: { ...cur, ...patch } };
+    });
+  };
+
+  const resetLineStates = () => setLines({});
+
   const submit = async () => {
+    setError('');
     if (!specimenId) {
       setError('请先选择标本');
       return;
@@ -80,52 +139,68 @@ export default function ProcedureForm() {
       return;
     }
 
-    const record = await addProcedure({
-      specimenId,
-      stepType,
-      nodeName: nodeName.trim(),
-      seq,
-      tools,
-      abrasive,
-      adhesive: fieldMap.adhesives.length > 0 ? adhesive : '',
-      adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
-      durationMin,
-      tempC,
-      rh,
-      photoBeforeIds: [],
-      photoAfterIds: [],
-      operator: operator.trim(),
-      startedAt: Date.now(),
-      state: 'pending',
+    // 组装领用行（事务内会再做批次 / 用量 / 库存 / 过期 / 重复批次校验）
+    const usageLines: UsageLineInput[] = selectedLines.map((line) => {
+      const key = usageLineKey(line.role, line.materialName);
+      const state = lines[key] ?? { lotId: '', qty: NaN };
+      return { ...line, lotId: state.lotId, qty: state.qty };
     });
 
+    let photos: PrepPhoto[] = [];
     if (withPhotos && specimen) {
-      const before: PrepPhoto = {
-        id: newId('pho'),
-        specimenId,
-        procedureId: record.id,
-        stage: 'before',
-        caption: `${nodeName.trim()} · 修复前（${specimen.specimenNo}）`,
-        dataUrl: makeSketchDataUrl(`修复前 · ${specimen.specimenNo}`, '#6b5844'),
-        capturedAt: Date.now(),
-      };
-      const after: PrepPhoto = {
-        id: newId('pho'),
-        specimenId,
-        procedureId: record.id,
-        stage: 'after',
-        caption: `${nodeName.trim()} · 修复后（${specimen.specimenNo}）`,
-        dataUrl: makeSketchDataUrl(`修复后 · ${specimen.specimenNo}`, '#3f5a4a'),
-        capturedAt: Date.now() + 1,
-      };
-      await db.photos.bulkPut([before, after]);
+      photos = [
+        {
+          id: newId('pho'),
+          specimenId,
+          procedureId: '',
+          stage: 'before',
+          caption: `${nodeName.trim()} · 修复前（${specimen.specimenNo}）`,
+          dataUrl: makeSketchDataUrl(`修复前 · ${specimen.specimenNo}`, '#6b5844'),
+          capturedAt: Date.now(),
+        },
+        {
+          id: newId('pho'),
+          specimenId,
+          procedureId: '',
+          stage: 'after',
+          caption: `${nodeName.trim()} · 修复后（${specimen.specimenNo}）`,
+          dataUrl: makeSketchDataUrl(`修复后 · ${specimen.specimenNo}`, '#3f5a4a'),
+          capturedAt: Date.now() + 1,
+        },
+      ];
     }
 
-    setError('');
-    setToast(`已追加工序节点 #${seq} ${stepType} · ${record.nodeName}`);
-    setNodeName('');
-    setTools([]);
-    setSeq(nextSeq + 1);
+    try {
+      const record = await addProcedure({
+        specimenId,
+        stepType,
+        nodeName: nodeName.trim(),
+        seq,
+        tools,
+        abrasive,
+        adhesive: fieldMap.adhesives.length > 0 ? adhesive : '',
+        adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
+        durationMin,
+        tempC,
+        rh,
+        photoBeforeIds: photos.filter((p) => p.stage === 'before').map((p) => p.id),
+        photoAfterIds: photos.filter((p) => p.stage === 'after').map((p) => p.id),
+        operator: operator.trim(),
+        usages: usageLines,
+        photos,
+      });
+
+      setToast(`已保存节点 #${seq} ${stepType} · ${record.nodeName}，材料已按批次扣减库存`);
+      setNodeName('');
+      setTools([]);
+      setAbrasive('');
+      setAdhesive('');
+      resetLineStates();
+      setSeq(nextSeq + 1);
+    } catch (e) {
+      // 库存不足 / 已过期 / 重复批次等：事务整体回滚，工序与库存均未落单
+      setError(e instanceof Error ? e.message : '保存失败，请检查材料批次与用量');
+    }
   };
 
   return (
@@ -176,6 +251,7 @@ export default function ProcedureForm() {
                   setTools([]);
                   setAbrasive('');
                   setAdhesive('');
+                  resetLineStates();
                 }}
               >
                 {STEP_TYPES.map((t) => (
@@ -217,7 +293,7 @@ export default function ProcedureForm() {
                   const v = e.target.value;
                   setTools(typeof v === 'string' ? v.split(',') : v);
                 }}
-                helperText="气动笔 / 剔针 / 超声波 等，可多选"
+                helperText="气动笔 / 剔针 / 超声波 等，可多选；选中后需在下方逐件选批次、填用量"
               >
                 {fieldMap.tools.map((t) => (
                   <MenuItem key={t} value={t}>
@@ -279,6 +355,109 @@ export default function ProcedureForm() {
               </Stack>
             ) : null}
 
+            {/* 材料领用：每件已选工具 / 磨料 / 胶种都要选批次并填用量，保存时按批次扣减 */}
+            <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'grey.50' }} data-testid="material-usages">
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: selectedLines.length ? 1 : 0 }}>
+                <Typography variant="subtitle2" fontWeight={700}>
+                  材料领用明细
+                </Typography>
+                <Chip size="small" label={`${selectedLines.length} 项`} />
+                <Typography variant="caption" color="text.secondary">
+                  保存即按所选批次扣减库存；批次过期或库存不足将无法保存
+                </Typography>
+              </Stack>
+              {selectedLines.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">
+                  先在上方选择工具 / 磨料 / 胶种，这里会逐项列出批次与用量。
+                </Typography>
+              ) : (
+                <Stack spacing={1.5}>
+                  {selectedLines.map((line) => {
+                    const key = usageLineKey(line.role, line.materialName);
+                    const candidates = lotsFor(line.role, line.materialName);
+                    const state = lines[key] ?? { lotId: '', qty: 1 };
+                    const chosen = lots.find((lot) => lot.id === state.lotId);
+                    const expired = chosen ? isLotExpired(chosen) : false;
+                    const short = chosen ? state.qty > chosen.qty : false;
+                    const noBatch = candidates.length === 0;
+                    return (
+                      <Box
+                        key={key}
+                        data-testid={`usage-row-${key}`}
+                        sx={{
+                          display: 'grid',
+                          gridTemplateColumns: { xs: '1fr', sm: '150px 1fr 170px' },
+                          gap: 1.5,
+                          alignItems: 'start',
+                        }}
+                      >
+                        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ pt: 1 }}>
+                          <Chip size="small" variant="outlined" label={MATERIAL_ROLE_LABEL[line.role]} />
+                          <Typography variant="body2" noWrap title={line.materialName}>
+                            {line.materialName}
+                          </Typography>
+                        </Stack>
+                        <TextField
+                          select
+                          size="small"
+                          fullWidth
+                          label="批次"
+                          required
+                          value={state.lotId}
+                          onChange={(e) => setLine(key, { lotId: e.target.value })}
+                          error={noBatch || expired}
+                          helperText={
+                            noBatch
+                              ? '台账中没有该材料的批次，请到「材料台账」登记'
+                              : chosen
+                                ? `批号 ${chosen.lotNo} · 现存 ${chosen.qty} ${chosen.unit}${
+                                    expired
+                                      ? ' · 已过期'
+                                      : shelfLifeLeftDays(chosen) <= 30
+                                        ? ` · ${shelfLifeLeftDays(chosen)} 天后到期`
+                                        : ''
+                                  }`
+                                : '请选择批次'
+                          }
+                        >
+                          {candidates.map((lot) => {
+                            const lotExpired = isLotExpired(lot);
+                            return (
+                              <MenuItem key={lot.id} value={lot.id} disabled={lotExpired || lot.qty <= 0}>
+                                {lot.lotNo} · {lot.name}
+                                {lot.spec ? `（${lot.spec}）` : ''} · 在库 {lot.qty} {lot.unit}
+                                {lotExpired ? ' · 已过期' : lot.qty <= 0 ? ' · 无库存' : ''}
+                              </MenuItem>
+                            );
+                          })}
+                        </TextField>
+                        <Box>
+                          <MeasureField
+                            label="用量"
+                            unit={chosen?.unit ?? '—'}
+                            min={0.1}
+                            max={chosen?.qty ?? 100000}
+                            step={0.1}
+                            value={state.qty}
+                            onChange={(v) => setLine(key, { qty: v })}
+                            hint={
+                              chosen
+                                ? short
+                                  ? `超出在库 ${chosen.qty} ${chosen.unit}`
+                                  : `在库 ${chosen.qty} ${chosen.unit}`
+                                : '先选批次'
+                            }
+                          />
+                        </Box>
+                      </Box>
+                    );
+                  })}
+                </Stack>
+              )}
+            </Paper>
+
+            <Divider />
+
             <Stack direction="row" spacing={1.5}>
               <Box sx={{ flex: 1 }}>
                 <MeasureField
@@ -334,12 +513,20 @@ export default function ProcedureForm() {
           <ProcedureTimeline
             items={progress.list}
             onFinish={async (pid) => {
-              await finish(pid);
-              setToast('节点已完成');
+              try {
+                await finish(pid);
+                setToast('节点已完成');
+              } catch (e) {
+                setToast(e instanceof Error ? e.message : '完成失败');
+              }
             }}
             onRollback={async (pid) => {
-              await rollback(pid);
-              setToast('节点已回退');
+              try {
+                await rollback(pid);
+                setToast('节点已回退，材料用量已退回对应批次');
+              } catch (e) {
+                setToast(e instanceof Error ? e.message : '回退失败');
+              }
             }}
           />
         </Paper>

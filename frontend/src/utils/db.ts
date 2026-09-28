@@ -7,7 +7,7 @@ import { makeSketchDataUrl } from '../types/photo';
 import { newId } from './id';
 
 /** 当前数据结构版本，写入 localStorage 便于回显 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DB_NAME = 'gbfossilprep';
 export const LS_VERSION_KEY = 'gbfossilprep:db-version';
 
@@ -52,6 +52,35 @@ class FossilPrepDB extends Dexie {
           .modify((row: any) => {
             if (!row.issues) row.issues = [];
             if (row.lowThreshold === undefined) row.lowThreshold = 1;
+          });
+      });
+    // v3：工序挂材料领用明细（批次 + 用量）；领用记录补用途 / 关联工序 / 退库标记
+    this.version(3)
+      .stores({
+        specimens: 'id, specimenNo, taxon, locality, status, createdAt',
+        procedures: 'id, specimenId, seq, stepType, state, startedAt',
+        supplies: 'id, kind, lotNo, name, openedAt',
+        photos: 'id, specimenId, procedureId, stage, capturedAt',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('procedures')
+          .toCollection()
+          .modify((row: any) => {
+            // 旧工序没有批次领用明细，补空数组，旧字段照常可读
+            if (!Array.isArray(row.usages)) row.usages = [];
+          });
+        await tx
+          .table('supplies')
+          .toCollection()
+          .modify((row: any) => {
+            if (Array.isArray(row.issues)) {
+              row.issues.forEach((issue: any) => {
+                // v2 的领用均来自台账手动登记
+                if (!issue.purpose) issue.purpose = 'manual';
+                if (issue.reversed === undefined) issue.reversed = false;
+              });
+            }
           });
       });
   }
@@ -118,14 +147,23 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
+  // 先固定领用记录 id，便于批次 issues 与工序 usages 互相指向
+  const issueAirId = newId('iss');
+  const issueSicId = newId('iss');
+  const issuePipId = newId('iss');
+  const issueB72Id = newId('iss');
+
+  const proc0Id = newId('prc');
+  const proc1Id = newId('prc');
+
   const procedures: PrepProcedure[] = [
     {
-      id: newId('prc'),
+      id: proc0Id,
       specimenId,
       stepType: '清修',
       nodeName: '左侧肩胛区粗清',
       seq: 1,
-      tools: ['气动笔', '剔针'],
+      tools: ['气动笔'],
       abrasive: '800 目',
       adhesive: '',
       adhesiveConc: 0,
@@ -138,9 +176,31 @@ export async function ensureSeedData(): Promise<void> {
       startedAt: now - 10 * day,
       state: 'done',
       finishedAt: now - 10 * day + 145 * 60000,
+      usages: [
+        {
+          key: 'tool:气动笔',
+          role: 'tool',
+          materialName: '气动笔',
+          lotId: 'seed-lot-airpen',
+          lotNo: 'AIRPEN-2402',
+          qty: 1,
+          unit: '支',
+          issueId: issueAirId,
+        },
+        {
+          key: 'abrasive:800 目',
+          role: 'abrasive',
+          materialName: '800 目',
+          lotId: 'seed-lot-sic800',
+          lotNo: 'SIC-800-2401',
+          qty: 1,
+          unit: '袋',
+          issueId: issueSicId,
+        },
+      ],
     },
     {
-      id: newId('prc'),
+      id: proc1Id,
       specimenId,
       stepType: '加固',
       nodeName: '围岩裂隙渗透加固',
@@ -157,6 +217,28 @@ export async function ensureSeedData(): Promise<void> {
       operator: '林砚秋',
       startedAt: now - 6 * day,
       state: 'pending',
+      usages: [
+        {
+          key: 'tool:渗透滴管',
+          role: 'tool',
+          materialName: '渗透滴管',
+          lotId: 'seed-lot-pip',
+          lotNo: 'PIP-3ML-24',
+          qty: 2,
+          unit: '支',
+          issueId: issuePipId,
+        },
+        {
+          key: 'adhesive:Paraloid B-72',
+          role: 'adhesive',
+          materialName: 'Paraloid B-72',
+          lotId: 'seed-lot-b72',
+          lotNo: 'B72-20240312',
+          qty: 1,
+          unit: '瓶',
+          issueId: issueB72Id,
+        },
+      ],
     },
   ];
 
@@ -164,7 +246,7 @@ export async function ensureSeedData(): Promise<void> {
     {
       id: newId('pho'),
       specimenId,
-      procedureId: procedures[0].id,
+      procedureId: proc0Id,
       stage: 'before',
       caption: '清修前 · 左侧肩胛区围岩包裹',
       dataUrl: makeSketchDataUrl('清修前 · FP-2024-0031', '#6b5844'),
@@ -173,7 +255,7 @@ export async function ensureSeedData(): Promise<void> {
     {
       id: newId('pho'),
       specimenId,
-      procedureId: procedures[0].id,
+      procedureId: proc0Id,
       stage: 'after',
       caption: '清修后 · 肩胛骨轮廓显露',
       dataUrl: makeSketchDataUrl('清修后 · FP-2024-0031', '#3f5a4a'),
@@ -185,50 +267,124 @@ export async function ensureSeedData(): Promise<void> {
 
   const supplies: SupplyLot[] = [
     {
-      id: newId('sup'),
+      id: 'seed-lot-b72',
       name: 'Paraloid B-72',
       kind: '胶种',
       spec: '分析纯 500 g',
       lotNo: 'B72-20240312',
-      qty: 4,
+      qty: 3,
       unit: '瓶',
       openedAt: now - 40 * day,
       shelfLifeMonths: 36,
       lowThreshold: 2,
       issues: [
         {
-          id: newId('iss'),
+          id: issueB72Id,
           qty: 1,
           operator: '林砚秋',
           specimenNo: 'FP-2024-0031',
           issuedAt: now - 6 * day,
+          purpose: 'procedure',
+          specimenId,
+          procedureId: proc1Id,
+          usageNote: '加固 #2 围岩裂隙渗透加固',
+          materialName: 'Paraloid B-72',
+          reversed: false,
+        },
+      ],
+    },
+    {
+      id: 'seed-lot-sic800',
+      name: '碳化硅磨料',
+      kind: '磨料',
+      spec: '800 目 1 kg',
+      lotNo: 'SIC-800-2401',
+      qty: 2,
+      unit: '袋',
+      openedAt: now - 60 * day,
+      shelfLifeMonths: 60,
+      lowThreshold: 1,
+      issues: [
+        {
+          id: issueSicId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 10 * day,
+          purpose: 'procedure',
+          specimenId,
+          procedureId: proc0Id,
+          usageNote: '清修 #1 左侧肩胛区粗清',
+          materialName: '800 目',
+          reversed: false,
+        },
+      ],
+    },
+    {
+      id: 'seed-lot-airpen',
+      name: '气动笔',
+      kind: '工具',
+      spec: 'TG-10 风磨笔',
+      lotNo: 'AIRPEN-2402',
+      qty: 1,
+      unit: '支',
+      openedAt: now - 90 * day,
+      shelfLifeMonths: 120,
+      lowThreshold: 1,
+      issues: [
+        {
+          id: issueAirId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 10 * day,
+          purpose: 'procedure',
+          specimenId,
+          procedureId: proc0Id,
+          usageNote: '清修 #1 左侧肩胛区粗清',
+          materialName: '气动笔',
+          reversed: false,
+        },
+      ],
+    },
+    {
+      id: 'seed-lot-pip',
+      name: '渗透滴管',
+      kind: '工具',
+      spec: '3 mL 一次性',
+      lotNo: 'PIP-3ML-24',
+      qty: 38,
+      unit: '支',
+      openedAt: now - 30 * day,
+      shelfLifeMonths: 60,
+      lowThreshold: 10,
+      issues: [
+        {
+          id: issuePipId,
+          qty: 2,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 6 * day,
+          purpose: 'procedure',
+          specimenId,
+          procedureId: proc1Id,
+          usageNote: '加固 #2 围岩裂隙渗透加固',
+          materialName: '渗透滴管',
+          reversed: false,
         },
       ],
     },
     {
       id: newId('sup'),
-      name: '碳化硅磨料',
-      kind: '磨料',
-      spec: '800 目 1 kg',
-      lotNo: 'SIC-800-2401',
-      qty: 1,
-      unit: '袋',
-      openedAt: now - 60 * day,
-      shelfLifeMonths: 60,
+      name: '氰基丙烯酸酯',
+      kind: '胶种',
+      spec: '502 类 20 g',
+      lotNo: 'CA-20220510',
+      qty: 5,
+      unit: '瓶',
+      openedAt: now - 400 * day,
+      shelfLifeMonths: 6,
       lowThreshold: 2,
-      issues: [],
-    },
-    {
-      id: newId('sup'),
-      name: '气动笔针头',
-      kind: '耗材',
-      spec: '钨钢 2.3 mm',
-      lotNo: 'NEEDLE-2312',
-      qty: 18,
-      unit: '支',
-      openedAt: now - 90 * day,
-      shelfLifeMonths: 120,
-      lowThreshold: 5,
       issues: [],
     },
     {
@@ -242,6 +398,19 @@ export async function ensureSeedData(): Promise<void> {
       openedAt: now - 200 * day,
       shelfLifeMonths: 120,
       lowThreshold: 1,
+      issues: [],
+    },
+    {
+      id: newId('sup'),
+      name: '气动笔针头',
+      kind: '耗材',
+      spec: '钨钢 2.3 mm',
+      lotNo: 'NEEDLE-2312',
+      qty: 18,
+      unit: '支',
+      openedAt: now - 90 * day,
+      shelfLifeMonths: 120,
+      lowThreshold: 5,
       issues: [],
     },
   ];
